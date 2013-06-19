@@ -286,6 +286,10 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 			policy->cpu, cur_freq, table[index].frequency);
 	policy->cur = table[index].frequency;
 
+	/* maxwen: I want unified scaling and governor behaviour for all CPUs */
+	policy->shared_type = CPUFREQ_SHARED_TYPE_ALL;
+	cpumask_copy(policy->related_cpus, cpu_possible_mask);
+
 	return 0;
 }
 
