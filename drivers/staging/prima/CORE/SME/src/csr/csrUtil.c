@@ -5759,10 +5759,11 @@ void csrReleaseProfile(tpAniSirGlobal pMac, tCsrRoamProfile *pProfile)
             pProfile->pWAPIReqIE = NULL;
         }
 #endif /* FEATURE_WLAN_WAPI */
-        if (pProfile->nAddIEScanLength)
+
+        if(pProfile->pAddIEScan)
         {
-           memset(pProfile->addIEScan, 0 , SIR_MAC_MAX_IE_LENGTH+2);
-           pProfile->nAddIEScanLength = 0;
+            palFreeMemory(pMac->hHdd, pProfile->pAddIEScan);
+            pProfile->pAddIEScan = NULL;
         }
 
         if(pProfile->pAddIEAssoc)

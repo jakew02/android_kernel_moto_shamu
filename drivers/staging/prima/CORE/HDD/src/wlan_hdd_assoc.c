@@ -2301,22 +2301,22 @@ eHalStatus hdd_smeRoamCallback( void *pContext, tCsrRoamInfo *pRoamInfo, tANI_U3
                     hdd_conf_mcastbcast_filter(pHddCtx, FALSE);
                     pHddCtx->configuredMcastBcastFilter =
                         pHddCtx->sus_res_mcastbcast_filter;
-                    pHddCtx->sus_res_mcastbcast_filter_valid = VOS_FALSE;
 
-                    hddLog(VOS_TRACE_LEVEL_INFO,
-                           "offload: disassociation happening, restoring configuredMcastBcastFilter");
-                    hddLog(VOS_TRACE_LEVEL_INFO,"McastBcastFilter = %d",
-                           pHddCtx->configuredMcastBcastFilter);
-                    hddLog(VOS_TRACE_LEVEL_INFO,
-                           "offload: already called mcastbcast filter");
                     (WLAN_HDD_GET_CTX(pAdapter))->hdd_mcastbcast_filter_set = FALSE;
                 }
-#ifdef WLAN_FEATURE_PACKET_FILTERING
-                /* Call to clear any MC Addr List filter applied after
-                 * successful connection.
-                 */
-                wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
+#ifdef WLAN_FEATURE_PACKET_FILTERING    
+                if (pHddCtx->cfg_ini->isMcAddrListFilter)
+                {
+                    /*Multicast addr filtering is enabled*/
+                    if (pAdapter->mc_addr_list.isFilterApplied)
+                    {
+                        /*Filter applied during suspend mode*/
+                        /*Clear it here*/
+                        wlan_hdd_set_mc_addr_list(pAdapter, FALSE);
+                    }
+                }
 #endif
+
             }
             break;
         case eCSR_ROAM_IBSS_LEAVE:

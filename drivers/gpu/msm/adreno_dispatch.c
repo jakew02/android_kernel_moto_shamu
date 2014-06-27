@@ -22,6 +22,13 @@
 #include "adreno_ringbuffer.h"
 #include "adreno_trace.h"
 
+#define ADRENO_DISPATCHER_ACTIVE 0
+#define ADRENO_DISPATCHER_PAUSE 1
+
+#define ADRENO_DISPATCHER_SOFT_FAULT 1
+#define ADRENO_DISPATCHER_HARD_FAULT 2
+#define ADRENO_DISPATCHER_TIMEOUT_FAULT 3
+
 #define CMDQUEUE_NEXT(_i, _s) (((_i) + 1) % (_s))
 
 /* Number of commands that can be queued in a context before it sleeps */
@@ -127,12 +134,12 @@ static int fault_detect_read_compare(struct kgsl_device *device)
 }
 
 /**
- * adreno_dispatcher_get_cmdbatch() - Get a new command from a context queue
+ * adreno_context_get_cmdbatch() - Get a new command from a context queue
  * @drawctxt: Pointer to the adreno draw context
  *
  * Dequeue a new command batch from the context list
  */
-static inline struct kgsl_cmdbatch *adreno_dispatcher_get_cmdbatch(
+static inline struct kgsl_cmdbatch *adreno_context_get_cmdbatch(
 		struct adreno_context *drawctxt)
 {
 	struct kgsl_cmdbatch *cmdbatch = NULL;
@@ -163,8 +170,7 @@ done:
 }
 
 /**
- * adreno_dispatcher_requeue_cmdbatch() - Put a command back on the context
- * queue
+ * adreno_context_requeue_cmdbatch() - Put a command back on the context queue
  * @drawctxt: Pointer to the adreno draw context
  * @cmdbatch: Pointer to the KGSL cmdbatch to requeue
  *
@@ -255,9 +261,7 @@ static int sendcmd(struct adreno_device *adreno_dev,
 
 	dispatcher->inflight++;
 
-	if (dispatcher->inflight == 1 &&
-			!test_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv)) {
-
+	if (dispatcher->inflight == 1) {
 		/* Time to make the donuts.  Turn on the GPU */
 		ret = kgsl_active_count_get(device);
 		if (ret) {
@@ -265,8 +269,6 @@ static int sendcmd(struct adreno_device *adreno_dev,
 			mutex_unlock(&device->mutex);
 			return ret;
 		}
-
-		set_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv);
 	}
 
 	ret = adreno_ringbuffer_submitcmd(adreno_dev, cmdbatch);
@@ -279,10 +281,8 @@ static int sendcmd(struct adreno_device *adreno_dev,
 	if (dispatcher->inflight == 1) {
 		if (ret == 0)
 			fault_detect_read(device);
-		else {
+		else
 			kgsl_active_count_put(device);
-			clear_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv);
-		}
 	}
 
 	mutex_unlock(&device->mutex);
@@ -340,15 +340,11 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 	/*
 	 * Each context can send a specific number of command batches per cycle
 	 */
-	while ((count < _context_cmdbatch_burst) &&
-		(dispatcher->inflight < _dispatcher_inflight)) {
+	for ( ; count < _context_cmdbatch_burst &&
+		dispatcher->inflight < _dispatcher_inflight; count++) {
 		int ret;
-		struct kgsl_cmdbatch *cmdbatch;
-
-		if (adreno_gpu_fault(adreno_dev) != 0)
-			break;
-
-		cmdbatch = adreno_dispatcher_get_cmdbatch(drawctxt);
+		struct kgsl_cmdbatch *cmdbatch =
+			adreno_context_get_cmdbatch(drawctxt);
 
 		if (cmdbatch == NULL)
 			break;
@@ -373,6 +369,7 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 		 */
 
 		if (cmdbatch->flags & KGSL_CONTEXT_SYNC) {
+			count--;
 			kgsl_cmdbatch_destroy(cmdbatch);
 			continue;
 		}
@@ -427,7 +424,8 @@ static int _adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 	int ret;
 
 	/* Leave early if the dispatcher isn't in a happy state */
-	if (adreno_gpu_fault(adreno_dev) != 0)
+	if ((dispatcher->state != ADRENO_DISPATCHER_ACTIVE) ||
+		adreno_gpu_fault(adreno_dev) != 0)
 			return 0;
 
 	plist_head_init(&requeue);
@@ -436,7 +434,8 @@ static int _adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 	while (dispatcher->inflight < _dispatcher_inflight) {
 
 		/* Stop doing things if the dispatcher is paused or faulted */
-		if (adreno_gpu_fault(adreno_dev) != 0)
+		if ((dispatcher->state != ADRENO_DISPATCHER_ACTIVE) ||
+			adreno_gpu_fault(adreno_dev) != 0)
 			break;
 
 		spin_lock(&dispatcher->plist_lock);
@@ -597,7 +596,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 
 	mutex_lock(&drawctxt->mutex);
 
-	if (kgsl_context_detached(&drawctxt->base)) {
+	if (drawctxt->flags & CTXT_FLAGS_BEING_DESTROYED) {
 		mutex_unlock(&drawctxt->mutex);
 		return -EINVAL;
 	}
@@ -608,7 +607,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	 */
 
 	if (drawctxt->flags & CTXT_FLAGS_FORCE_PREAMBLE) {
-		set_bit(CMDBATCH_FLAG_FORCE_PREAMBLE, &cmdbatch->priv);
+		cmdbatch->priv |= CMDBATCH_FLAG_FORCE_PREAMBLE;
 		drawctxt->flags &= ~CTXT_FLAGS_FORCE_PREAMBLE;
 	}
 
@@ -619,7 +618,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	 */
 
 	if (drawctxt->flags & CTXT_FLAGS_SKIP_EOF) {
-		set_bit(CMDBATCH_FLAG_SKIP, &cmdbatch->priv);
+		cmdbatch->priv |= CMDBATCH_FLAG_SKIP;
 
 		/*
 		 * If this command batch represents the EOF then clear the way
@@ -641,7 +640,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	/* Wait for room in the context queue */
 
 	while (drawctxt->queued >= _context_cmdqueue_size) {
-		trace_adreno_drawctxt_sleep(drawctxt);
+		trace_adreno_context_sleep(drawctxt);
 		mutex_unlock(&drawctxt->mutex);
 
 		ret = wait_event_interruptible_timeout(drawctxt->wq,
@@ -649,7 +648,7 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 			msecs_to_jiffies(_context_queue_wait));
 
 		mutex_lock(&drawctxt->mutex);
-		trace_adreno_drawctxt_wake(drawctxt);
+		trace_adreno_context_wake(drawctxt);
 
 		if (ret <= 0) {
 			mutex_unlock(&drawctxt->mutex);
@@ -677,6 +676,9 @@ int adreno_dispatcher_queue_cmd(struct adreno_device *adreno_dev,
 	}
 
 	cmdbatch->timestamp = *timestamp;
+
+	/* The batch fault policy is the current system fault policy */
+	cmdbatch->fault_policy = adreno_dev->ft_policy;
 
 	/*
 	 * Set the fault tolerance policy for the command batch - assuming the
@@ -1154,6 +1156,10 @@ replay:
 		}
 	}
 
+	mutex_lock(&device->mutex);
+	kgsl_active_count_put(device);
+	mutex_unlock(&device->mutex);
+
 	kfree(replay);
 
 	return 1;
@@ -1321,16 +1327,19 @@ static void adreno_dispatcher_work(struct work_struct *work)
 	 */
 	if (!fault_handled && dispatcher_do_fault(device))
 		goto done;
-
 	/*
-	 * If inflight went to 0, queue back up the event processor to catch
-	 * stragglers
+	 * Decrement the active count to 0 - this will allow the system to go
+	 * into suspend even if there are queued command batches
 	 */
+
+	mutex_lock(&device->mutex);
 	if (count && dispatcher->inflight == 0) {
-		mutex_lock(&device->mutex);
+		del_timer_sync(&dispatcher->fault_timer);
+		kgsl_active_count_put(device);
+		/* Queue back up the event processor to catch stragglers */
 		queue_work(device->work_queue, &device->ts_expired_ws);
-		mutex_unlock(&device->mutex);
 	}
+	mutex_unlock(&device->mutex);
 
 	/* Dispatch new commands if we have the room */
 	if (dispatcher->inflight < _dispatcher_inflight)
@@ -1344,29 +1353,12 @@ done:
 
 		/* Update the timeout timer for the next command batch */
 		mod_timer(&dispatcher->timer, cmdbatch->expires);
-
-		/* There are still things in flight - update the idle counts */
-		mutex_lock(&device->mutex);
-		kgsl_pwrscale_idle(device);
-		mutex_unlock(&device->mutex);
-	} else {
-		/* There is nothing left in the pipeline.  Shut 'er down boys */
-		mutex_lock(&device->mutex);
-
-		/*
-		 * Stop the fault timer before decrementing the active count to
-		 * avoid reading the hardware registers while we are trying to
-		 * turn clocks off
-		 */
-		del_timer_sync(&dispatcher->fault_timer);
-
-		if (test_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv)) {
-			kgsl_active_count_put(device);
-			clear_bit(ADRENO_DISPATCHER_POWER, &dispatcher->priv);
-		}
-
-		mutex_unlock(&device->mutex);
 	}
+
+	/* Before leaving update the pwrscale information */
+	mutex_lock(&device->mutex);
+	kgsl_pwrscale_idle(device);
+	mutex_unlock(&device->mutex);
 
 	mutex_unlock(&dispatcher->mutex);
 }
@@ -1460,17 +1452,54 @@ void adreno_dispatcher_irq_fault(struct kgsl_device *device)
 }
 
 /**
+ * adreno_dispatcher_pause() - stop the dispatcher
+ * @adreno_dev: pointer to the adreno device structure
+ *
+ * Pause the dispather so it doesn't accept any new commands
+ */
+void adreno_dispatcher_pause(struct adreno_device *adreno_dev)
+{
+	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
+
+	/*
+	 * This will probably get called while holding other mutexes so don't
+	 * take the dispatcher mutex.  The biggest penalty is that another
+	 * command might be submitted while we are in here but thats okay
+	 * because whoever is waiting for the drain will just have another
+	 * command batch to wait for
+	 */
+
+	dispatcher->state = ADRENO_DISPATCHER_PAUSE;
+}
+
+/**
+ * adreno_dispatcher_resume() - resume the dispatcher
+ * @adreno_dev: pointer to the adreno device structure
+ *
+ * Set the dispatcher active so it can start accepting commands again
+ */
+void adreno_dispatcher_resume(struct adreno_device *adreno_dev)
+{
+	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
+
+	dispatcher->state = ADRENO_DISPATCHER_ACTIVE;
+	adreno_dispatcher_schedule(&adreno_dev->dev);
+}
+
+/**
  * adreno_dispatcher_start() - activate the dispatcher
  * @adreno_dev: pointer to the adreno device structure
  *
  * Set the disaptcher active and start the loop once to get things going
  */
-void adreno_dispatcher_start(struct kgsl_device *device)
+void adreno_dispatcher_start(struct adreno_device *adreno_dev)
 {
-	complete_all(&device->cmdbatch_gate);
+	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
+
+	dispatcher->state = ADRENO_DISPATCHER_ACTIVE;
 
 	/* Schedule the work loop to get things going */
-	adreno_dispatcher_schedule(device);
+	adreno_dispatcher_schedule(&adreno_dev->dev);
 }
 
 /**
@@ -1485,6 +1514,8 @@ void adreno_dispatcher_stop(struct adreno_device *adreno_dev)
 
 	del_timer_sync(&dispatcher->timer);
 	del_timer_sync(&dispatcher->fault_timer);
+
+	dispatcher->state = ADRENO_DISPATCHER_PAUSE;
 }
 
 /**
@@ -1656,6 +1687,8 @@ int adreno_dispatcher_init(struct adreno_device *adreno_dev)
 
 	plist_head_init(&dispatcher->pending);
 	spin_lock_init(&dispatcher->plist_lock);
+
+	dispatcher->state = ADRENO_DISPATCHER_ACTIVE;
 
 	ret = kobject_init_and_add(&dispatcher->kobj, &ktype_dispatcher,
 		&device->dev->kobj, "dispatch");

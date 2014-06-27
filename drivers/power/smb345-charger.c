@@ -617,11 +617,6 @@ static void wireless_isr_work_function(struct work_struct *dat)
 
 	SMB_NOTICE("wireless state = %d\n", wireless_is_plugged());
 
-	if (otg_on) {
-		SMB_NOTICE("bypass wireless isr due to otg_on\n");
-		return;
-	}
-
 	if (wireless_is_plugged())
 		wireless_set();
 	else
@@ -630,10 +625,6 @@ static void wireless_isr_work_function(struct work_struct *dat)
 
 static void wireless_det_work_function(struct work_struct *dat)
 {
-	if (otg_on) {
-		SMB_NOTICE("bypass wireless isr due to otg_on\n");
-		return;
-	}
 	if (wireless_is_plugged())
 		wireless_set();
 }
@@ -778,9 +769,6 @@ void smb345_otg_status(bool on)
 				"otg..\n", __func__);
 			return;
 		}
-		if (wireless_is_plugged())
-			wireless_reset();
-		return;
 	} else
 		otg_on = false;
 

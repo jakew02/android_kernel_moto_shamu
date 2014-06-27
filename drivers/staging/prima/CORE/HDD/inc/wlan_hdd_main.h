@@ -682,13 +682,6 @@ struct hdd_adapter_s
 
    /** Handle to the network device */
    struct net_device *dev;
-
-#ifdef WLAN_NS_OFFLOAD
-   /** IPv6 notifier callback for handling NS offload on change in IP */
-   struct notifier_block ipv6_notifier;
-   bool ipv6_notifier_registered;
-   struct work_struct  ipv6NotifierWorkQueue;
-#endif
     
    //TODO Move this to sta Ctx
    struct wireless_dev wdev ;
@@ -1004,28 +997,24 @@ struct hdd_context_s
      * */
     v_U8_t configuredMcastBcastFilter;
 
-    v_U8_t sus_res_mcastbcast_filter;
-
-    v_BOOL_t sus_res_mcastbcast_filter_valid;
-
     /* Use below lock to protect access to isSchedScanUpdatePending
      * since it will be accessed in two different contexts.
      */
     spinlock_t schedScan_lock;
+
+    v_U8_t sus_res_mcastbcast_filter;
 
     // Flag keeps track of wiphy suspend/resume
     v_BOOL_t isWiphySuspended;
 
     // Indicates about pending sched_scan results
     v_BOOL_t isSchedScanUpdatePending;
-
     /*
     * TX_rx_pkt_count_timer
     */
     vos_timer_t    tx_rx_trafficTmr;
     v_U8_t         drvr_miracast;
     v_U8_t         issplitscan_enabled;
-
 };
 
 
@@ -1107,7 +1096,5 @@ int wlan_hdd_validate_context(hdd_context_t *pHddCtx);
 int wlan_hdd_setIPv6Filter(hdd_context_t *pHddCtx, tANI_U8 filterType, tANI_U8 sessionId);
 #endif
 VOS_STATUS hdd_issta_p2p_clientconnected(hdd_context_t *pHddCtx);
-#ifdef WLAN_NS_OFFLOAD
-void hdd_ipv6_notifier_work_queue(struct work_struct *work);
-#endif
+
 #endif    // end #if !defined( WLAN_HDD_MAIN_H )
